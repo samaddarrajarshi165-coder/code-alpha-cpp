@@ -1,0 +1,314 @@
+/*
+AIChatbot.java
+
+A self-contained Java program implementing a simple AI Chatbot with:
+ - Basic NLP preprocessing (tokenize, lowercase, remove punctuation)
+ - TF-IDF vectorizer + cosine similarity to match user queries to FAQ answers
+ - Rule-based fallback for greetings and small-talk
+ - Ability to load training data from a plain text file (faqs.txt) with lines: question|answer
+ - Swing GUI for real-time interaction
+ - Simple conversation logging to a file (chatlog.txt)
+
+How to use:
+ 1. Put an optional "faqs.txt" in the same folder as this file. Each line should be:
+      question|answer
+    Example:
+      What is your name?|I'm RoboHelper, your study assistant.
+
+ 2. Compile and run:
+      javac AIChatbot.java
+      java AIChatbot
+
+Notes / Extensions:
+ - This is a lightweight educational chatbot (no external libraries).
+ - You can extend preprocessing, add stemming, or replace TF-IDF with a ML model.
+ - To persist learned FAQs, append to faqs.txt; program loads them at startup.
+*/
+
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.*;
+import java.io.*;
+import java.nio.file.*;
+import java.util.*;
+import java.util.List;
+
+public class AIChatbot {
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -> new ChatWindow(new KnowledgeBase()).show());
+    }
+}
+
+// ------------------------- GUI -------------------------
+class ChatWindow {
+    private JFrame frame;
+    private JTextArea chatArea;
+    private JTextField inputField;
+    private JButton sendButton;
+    private KnowledgeBase kb;
+
+    ChatWindow(KnowledgeBase kb) {
+        this.kb = kb;
+        frame = new JFrame("AI Chatbot - Simple TF-IDF + Rules");
+        chatArea = new JTextArea(20, 50);
+        chatArea.setEditable(false);
+        chatArea.setLineWrap(true);
+        chatArea.setWrapStyleWord(true);
+        inputField = new JTextField(40);
+        sendButton = new JButton("Send");
+
+        JPanel panel = new JPanel();
+        panel.setLayout(new FlowLayout());
+        panel.add(inputField);
+        panel.add(sendButton);
+
+        frame.getContentPane().setLayout(new BorderLayout());
+        frame.getContentPane().add(new JScrollPane(chatArea), BorderLayout.CENTER);
+        frame.getContentPane().add(panel, BorderLayout.SOUTH);
+        frame.pack();
+        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+
+        // Events
+        sendButton.addActionListener(e -> handleUserMessage());
+        inputField.addActionListener(e -> handleUserMessage());
+
+        // Welcome message
+        appendBot("Hello! I'm a simple AI chatbot. Ask me FAQs or say 'help'.");
+    }
+
+    void show() { frame.setVisible(true); }
+
+    private void handleUserMessage() {
+        String text = inputField.getText().trim();
+        if (text.isEmpty()) return;
+        appendUser(text);
+        inputField.setText("");
+
+        String response = kb.getResponse(text);
+        appendBot(response);
+
+        // log conversation
+        kb.logConversation(text, response);
+    }
+
+    private void appendUser(String s) {
+        chatArea.append("You: " + s + "\n");
+    }
+
+    private void appendBot(String s) {
+        chatArea.append("Bot: " + s + "\n\n");
+    }
+}
+
+// ------------------------- Knowledge Base and NLP -------------------------
+class KnowledgeBase {
+    private List<String> questions = new ArrayList<>();
+    private List<String> answers = new ArrayList<>();
+    private Map<String, Integer> vocab = new HashMap<>();
+    private List<double[]> tfidfVectors = new ArrayList<>();
+    private boolean vectorBuilt = false;
+    private final String faqFile = "faqs.txt";
+    private final String logFile = "chatlog.txt";
+
+    KnowledgeBase() {
+        loadDefaultFAQs();
+        loadFromFile(faqFile);
+        buildVectors();
+    }
+
+    // Load some canned Q/A so the bot can answer even if no faqs.txt
+    private void loadDefaultFAQs() {
+        addQA("what is your name", "I'm RoboHelper, a small educational chatbot.");
+        addQA("how can you help me", "I can answer frequently asked questions (FAQs). Try asking: 'What is Java?' or 'How to compile a program?'");
+        addQA("what is java", "Java is a high-level, class-based, object-oriented programming language.");
+        addQA("how to compile java", "Use javac filename.java to compile and java ClassName to run the program.");
+        addQA("what is tf-idf", "TF-IDF is a numerical statistic intended to reflect how important a word is to a document in a collection.");
+    }
+
+    private void addQA(String q, String a) {
+        questions.add(preprocess(q));
+        answers.add(a);
+    }
+
+    // Loads faqs from file with format: question|answer per line
+    private void loadFromFile(String filename) {
+        Path p = Paths.get(filename);
+        if (!Files.exists(p)) return;
+        try (BufferedReader br = Files.newBufferedReader(p)) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                String[] parts = line.split("\\|", 2);
+                if (parts.length == 2) {
+                    addQA(parts[0].trim(), parts[1].trim());
+                }
+            }
+        } catch (IOException e) {
+            System.err.println("Failed to read " + filename + ": " + e.getMessage());
+        }
+    }
+
+    // Build TF-IDF vectors for all questions
+    private void buildVectors() {
+        vocab.clear();
+        List<List<String>> tokenized = new ArrayList<>();
+        for (String q : questions) {
+            List<String> tokens = tokenize(q);
+            tokenized.add(tokens);
+            for (String t : tokens) {
+                vocab.putIfAbsent(t, vocab.size());
+            }
+        }
+        int V = vocab.size();
+        int N = questions.size();
+        double[] idf = new double[V];
+
+        // compute document frequency
+        int[] df = new int[V];
+        for (List<String> doc : tokenized) {
+            Set<String> seen = new HashSet<>(doc);
+            for (String t : seen) df[vocab.get(t)]++;
+        }
+        for (Map.Entry<String, Integer> e : vocab.entrySet()) {
+            int idx = e.getValue();
+            idf[idx] = Math.log((1.0 + N) / (1.0 + df[idx])) + 1.0; // smoothed idf
+        }
+
+        tfidfVectors.clear();
+        for (List<String> doc : tokenized) {
+            double[] vec = new double[V];
+            Map<Integer, Integer> tf = new HashMap<>();
+            for (String t : doc) {
+                tf.put(vocab.get(t), tf.getOrDefault(vocab.get(t), 0) + 1);
+            }
+            double norm = 0.0;
+            for (Map.Entry<Integer, Integer> e : tf.entrySet()) {
+                int idx = e.getKey();
+                double tfidf = e.getValue() * idf[idx];
+                vec[idx] = tfidf;
+                norm += tfidf * tfidf;
+            }
+            norm = Math.sqrt(norm);
+            if (norm > 0) {
+                for (int i = 0; i < V; i++) vec[i] /= norm; // normalize
+            }
+            tfidfVectors.add(vec);
+        }
+        vectorBuilt = true;
+    }
+
+    // Main method to get response for user input
+    String getResponse(String userInput) {
+        String clean = preprocess(userInput);
+
+        // Rule-based small talk
+        String rule = ruleBased(clean);
+        if (rule != null) return rule;
+
+        // If we don't have any vector yet, fallback
+        if (!vectorBuilt || tfidfVectors.isEmpty()) {
+            return "Sorry, I don't have enough knowledge yet. Try adding FAQs in faqs.txt.";
+        }
+
+        // Vectorize user input
+        double[] queryVec = vectorize(clean);
+        if (queryVec == null) return "I didn't understand that. Could you ask differently?";
+
+        // Find best matching question in KB by cosine similarity
+        double bestSim = -1.0;
+        int bestIdx = -1;
+        for (int i = 0; i < tfidfVectors.size(); i++) {
+            double sim = dotProduct(queryVec, tfidfVectors.get(i));
+            if (sim > bestSim) {
+                bestSim = sim;
+                bestIdx = i;
+            }
+        }
+
+        // Threshold to decide if match is confident enough
+        if (bestSim > 0.35 && bestIdx >= 0) {
+            return answers.get(bestIdx) + String.format("\n\n(Confidence: %.2f)", bestSim);
+        } else {
+            return "I couldn't find a close answer. You can teach me by adding a QA pair to faqs.txt in the format: question|answer";
+        }
+    }
+
+    // Preprocess: lowercase, remove punctuation except ' and spaces
+    private String preprocess(String s) {
+        s = s.toLowerCase();
+        s = s.replaceAll("[^a-z0-9\\s']", " ");
+        s = s.replaceAll("\\s+", " ").trim();
+        return s;
+    }
+
+    private List<String> tokenize(String s) {
+        if (s.isEmpty()) return new ArrayList<>();
+        String[] parts = s.split("\\s+");
+        List<String> tokens = new ArrayList<>();
+        for (String p : parts) {
+            if (!p.isEmpty()) tokens.add(p);
+        }
+        return tokens;
+    }
+
+    private double[] vectorize(String s) {
+        List<String> tokens = tokenize(s);
+        if (tokens.isEmpty()) return null;
+        int V = vocab.size();
+        double[] vec = new double[V];
+        Map<Integer, Integer> tf = new HashMap<>();
+        for (String t : tokens) {
+            Integer idx = vocab.get(t);
+            if (idx != null) tf.put(idx, tf.getOrDefault(idx, 0) + 1);
+        }
+        if (tf.isEmpty()) return null; // no known words
+
+        // Approximate IDF weights using the same idf as built vectors
+        // To be consistent, rebuild idf from tfidfVectors' construction
+        int N = questions.size();
+        int[] df = new int[V];
+        for (int i = 0; i < questions.size(); i++) {
+            Set<Integer> seen = new HashSet<>();
+            double[] v = tfidfVectors.get(i);
+            for (int j = 0; j < v.length; j++) if (v[j] != 0) seen.add(j);
+            for (int id : seen) df[id]++;
+        }
+        double[] idf = new double[V];
+        for (int i = 0; i < V; i++) idf[i] = Math.log((1.0 + N) / (1.0 + df[i])) + 1.0;
+
+        double norm = 0.0;
+        for (Map.Entry<Integer, Integer> e : tf.entrySet()) {
+            int idx = e.getKey();
+            double tfidf = e.getValue() * idf[idx];
+            vec[idx] = tfidf;
+            norm += tfidf * tfidf;
+        }
+        norm = Math.sqrt(norm);
+        if (norm > 0) for (int i = 0; i < V; i++) vec[i] /= norm;
+        return vec;
+    }
+
+    private double dotProduct(double[] a, double[] b) {
+        double sum = 0.0;
+        int n = Math.min(a.length, b.length);
+        for (int i = 0; i < n; i++) sum += a[i] * b[i];
+        return sum;
+    }
+
+    // Very small rule-based replies for greetings and help
+    private String ruleBased(String clean) {
+        if (clean.matches(".*\\b(hello|hi|hey|yo)\\b.*")) return "Hi there! How can I help you today?";
+        if (clean.matches(".*\\b(thanks|thank you|thx)\\b.*")) return "You're welcome!";
+        if (clean.equals("help")) return "I can answer FAQs. To teach me, add lines to faqs.txt with question|answer and restart the bot.";
+        if (clean.matches(".*\\b(bye|goodbye|see ya)\\b.*")) return "Goodbye! Have a nice day.";
+        return null;
+    }
+
+    // Append chat to log file
+    void logConversation(String user, String bot) {
+        try (BufferedWriter bw = new BufferedWriter(new FileWriter(logFile, true))) {
+            bw.write(new Date().toString() + " | USER: " + user + " | BOT: " + bot + "\n");
+        } catch (IOException e) {
+            System.err.println("Failed to write log: " + e.getMessage());
+        }
+    }
+}
